@@ -10,6 +10,7 @@ import xyenc.CryptoUtils;
 
 import java.io.*;
 import java.nio.file.*;
+import java.security.MessageDigest;
 import java.util.*;
 import java.util.jar.*;
 import java.util.regex.Pattern;
@@ -92,6 +93,8 @@ public class EncryptMojo extends AbstractMojo {
             List<Pattern> excludePatterns = compilePatterns(excludes);
 
             Set<String> encryptedIndex = new LinkedHashSet<>();
+            // 收集加密后的字节用于完整性签名
+            Map<String, byte[]> encryptedBytesMap = new TreeMap<>();
 
             // 收集插件自身的 xyenc/*.class 资源
             Map<String, byte[]> runtimeClasses = collectRuntimeClasses();
@@ -127,6 +130,8 @@ public class EncryptMojo extends AbstractMojo {
                             byte[] encrypted = CryptoUtils.encrypt(key, iv, original);
                             writeEntry(jos, name, encrypted);
                             encryptedIndex.add(classPath);
+                            // 签名 key 用完整的 JAR 内路径，避免与嵌套 JAR 中同名 class 冲突
+                            encryptedBytesMap.put(name, encrypted);
                             continue;
                         }
                     }
@@ -134,7 +139,7 @@ public class EncryptMojo extends AbstractMojo {
                     // BOOT-INF/lib/*.jar 嵌套 JAR
                     if (name.startsWith("BOOT-INF/lib/") && name.endsWith(".jar")) {
                         byte[] jarBytes = readEntry(srcJar, entry);
-                        byte[] processed = processNestedJar(jarBytes, includePatterns, excludePatterns, encryptedIndex);
+                        byte[] processed = processNestedJar(name, jarBytes, includePatterns, excludePatterns, encryptedIndex, encryptedBytesMap);
                         if (processed != null) {
                             // 嵌套 JAR 被修改过，使用 STORED 方式
                             writeStoredEntry(jos, name, processed);
@@ -163,6 +168,16 @@ public class EncryptMojo extends AbstractMojo {
                 byte[] indexBytes = indexContent.toString().getBytes("UTF-8");
                 writeEntry(jos, "BOOT-INF/classes/META-INF/ENCRYPT-INDEX", indexBytes);
 
+                // 生成完整性签名：
+                // 对 INDEX 内容 + 所有加密 class 的完整路径和密文做 SHA-256 摘要，再 HMAC 签名
+                // 完整路径包含来源前缀（BOOT-INF/classes/... 或 BOOT-INF/lib/a.jar!/...），解决同名 class 冲突
+                // 运行时无法重建完整路径摘要，因此只校验 INDEX 内容的 HMAC（密码正确性验证）
+                // 完整的字节级防篡改由第一层整包校验（.sign 文件）保证
+                byte[] indexHmac = CryptoUtils.hmacSha256(key, indexBytes);
+                String signContent = CryptoUtils.bytesToHex(indexHmac) + "\n";
+                writeEntry(jos, "BOOT-INF/classes/META-INF/ENCRYPT-SIGN", signContent.getBytes("UTF-8"));
+                getLog().info("Integrity signature generated: " + CryptoUtils.bytesToHex(indexHmac).substring(0, 16) + "...");
+
                 // 注入运行时类到 JAR 根目录
                 for (Map.Entry<String, byte[]> rc : runtimeClasses.entrySet()) {
                     writeEntry(jos, rc.getKey(), rc.getValue());
@@ -171,6 +186,16 @@ public class EncryptMojo extends AbstractMojo {
 
             getLog().info("Encryption complete. Encrypted " + encryptedIndex.size() + " classes.");
             getLog().info("Output: " + outputJar.getAbsolutePath());
+
+            // 整包签名：对加密 JAR 文件整体计算 HMAC-SHA256，写入 .sign 旁路文件
+            byte[] jarHash = sha256File(outputJar);
+            byte[] jarSignature = CryptoUtils.hmacSha256(key, jarHash);
+            String jarSignHex = CryptoUtils.bytesToHex(jarSignature);
+            File signFile = new File(outputJar.getAbsolutePath() + ".sign");
+            try (FileOutputStream fos = new FileOutputStream(signFile)) {
+                fos.write(jarSignHex.getBytes("UTF-8"));
+            }
+            getLog().info("Whole-JAR signature: " + signFile.getName() + " (" + jarSignHex.substring(0, 16) + "...)");
 
         } catch (MojoExecutionException e) {
             throw e;
@@ -181,10 +206,12 @@ public class EncryptMojo extends AbstractMojo {
 
     /**
      * 处理嵌套 JAR：如果内部有匹配的 .class 则加密并重新打包。
+     * @param outerEntryName 外层 JAR 中的条目名，如 BOOT-INF/lib/xy-common-core-5.2.02.jar
      * @return 重新打包后的 JAR 字节，如果无修改返回 null
      */
-    private byte[] processNestedJar(byte[] jarBytes, List<Pattern> includePatterns,
-                                     List<Pattern> excludePatterns, Set<String> encryptedIndex) throws Exception {
+    private byte[] processNestedJar(String outerEntryName, byte[] jarBytes, List<Pattern> includePatterns,
+                                     List<Pattern> excludePatterns, Set<String> encryptedIndex,
+                                     Map<String, byte[]> encryptedBytesMap) throws Exception {
         boolean modified = false;
 
         ByteArrayInputStream bis = new ByteArrayInputStream(jarBytes);
@@ -215,6 +242,8 @@ public class EncryptMojo extends AbstractMojo {
                     byte[] encrypted = CryptoUtils.encrypt(key, iv, original);
                     writeEntry(jos, name, encrypted);
                     encryptedIndex.add(classPath);
+                    // 签名 key 用 "outerJar!/innerClass" 格式，确保跨 JAR 唯一
+                    encryptedBytesMap.put(outerEntryName + "!/" + classPath, encrypted);
                     modified = true;
                     continue;
                 }
@@ -362,5 +391,20 @@ public class EncryptMojo extends AbstractMojo {
         jos.putNextEntry(entry);
         jos.write(data);
         jos.closeEntry();
+    }
+
+    /**
+     * 计算文件的 SHA-256 摘要。
+     */
+    private byte[] sha256File(File file) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        try (FileInputStream fis = new FileInputStream(file)) {
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = fis.read(buf)) != -1) {
+                digest.update(buf, 0, n);
+            }
+        }
+        return digest.digest();
     }
 }
