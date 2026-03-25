@@ -35,7 +35,7 @@ public class EncryptMojo extends AbstractMojo {
     @Parameter(defaultValue = "${project}", readonly = true, required = true)
     private MavenProject project;
 
-    @Parameter(property = "jar.encrypt.password", required = true)
+    @Parameter(property = "jar.encrypt.password", required = false)
     private String password;
 
     /**
@@ -65,6 +65,12 @@ public class EncryptMojo extends AbstractMojo {
             // 跳过 POM 类型模块
             if ("pom".equals(project.getPackaging())) {
                 getLog().info("Skipping POM module: " + project.getArtifactId());
+                return;
+            }
+
+            // password 为空时跳过加密
+            if (password == null || password.trim().isEmpty()) {
+                getLog().info("jar.encrypt.password is not set, skipping encryption for: " + project.getArtifactId());
                 return;
             }
 
