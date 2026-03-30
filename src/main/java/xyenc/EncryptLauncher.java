@@ -10,13 +10,14 @@ import java.io.InputStreamReader;
 import java.net.URL;
 import java.security.MessageDigest;
 import java.util.Collection;
+import java.util.List;
 
 /**
  * 加密 JAR 启动器。extends PropertiesLauncher 以支持 -Dloader.path 外部依赖加载。
  * <p>
  * 密码来源（优先级）：
- * 1. -Djar.encrypt.password=xxx / -Djar.encrypt.sign=xxx 系统属性
- * 2. 命令行参数: java -jar app.jar <password> <jarSign>
+ * 1. -Djar.encrypt.password=xxx 系统属性（-jar 之前）
+ * 2. --jar.encrypt.password=xxx 命令行参数（-jar 之后）
  * 3. jarSign 可从 jar 同级目录的 .sign 文件自动读取
  * 4. stdin 单行输入
  * <p>
@@ -33,17 +34,24 @@ public class EncryptLauncher extends PropertiesLauncher {
     }
 
     public static void main(String[] args) throws Exception {
-        // 优先级: 1. -D系统属性  2. 命令行参数  3. stdin控制台输入
+        // 解析 --key=value 风格的命令行参数（-jar 之后的部分）
+        List<String> remainingArgs = new java.util.ArrayList<>();
+        for (String arg : args) {
+            if (arg == null) continue;
+            String val;
+            if ((val = extractArgValue(arg, "jar.encrypt.password")) != null) {
+                System.setProperty("jar.encrypt.password", val);
+            } else if ((val = extractArgValue(arg, "jar.encrypt.sign")) != null) {
+                System.setProperty("jar.encrypt.sign", val);
+            } else {
+                remainingArgs.add(arg);
+            }
+        }
+        String[] cleanArgs = remainingArgs.toArray(new String[0]);
+
+        // 优先级: 1. -D系统属性 / --命令行参数  2. .sign文件  3. stdin控制台输入
         String password = System.getProperty("jar.encrypt.password");
         String jarSign = System.getProperty("jar.encrypt.sign");
-
-        // 从命令行参数读取 (java -jar app.jar <password> <jarSign>)
-        if ((password == null || password.trim().isEmpty()) && args.length > 0 && args[0] != null && !args[0].trim().isEmpty()) {
-            password = args[0].trim();
-        }
-        if ((jarSign == null || jarSign.trim().isEmpty()) && args.length > 1 && args[1] != null && !args[1].trim().isEmpty()) {
-            jarSign = args[1].trim();
-        }
 
         // 从jar同级目录的 .sign 文件读取 jarSign
         if (jarSign == null || jarSign.trim().isEmpty()) {
@@ -58,7 +66,7 @@ public class EncryptLauncher extends PropertiesLauncher {
             password = reader.readLine();
         }
         if (password == null || password.trim().isEmpty()) {
-            System.err.println("[Encrypt] Error: No password provided. Use -Djar.encrypt.password=xxx, command args, or stdin.");
+            System.err.println("[Encrypt] Error: No password provided. Use -Djar.encrypt.password=xxx or --jar.encrypt.password=xxx");
             System.exit(1);
         }
         password = password.trim();
@@ -70,7 +78,7 @@ public class EncryptLauncher extends PropertiesLauncher {
             jarSign = reader.readLine();
         }
         if (jarSign == null || jarSign.trim().isEmpty()) {
-            System.err.println("[Encrypt] Error: No jarSign provided. Use -Djar.encrypt.sign=xxx, command args, or stdin.");
+            System.err.println("[Encrypt] Error: No jarSign provided. Use -Djar.encrypt.sign=xxx or --jar.encrypt.sign=xxx");
             System.exit(1);
         }
         jarSign = jarSign.trim();
@@ -84,7 +92,7 @@ public class EncryptLauncher extends PropertiesLauncher {
         // 整包校验：在 launch 之前校验 JAR 文件本身
         verifyJarFile(jarSign);
 
-        new EncryptLauncher().launch(args);
+        new EncryptLauncher().launch(cleanArgs);
     }
 
     @Override
@@ -231,5 +239,16 @@ public class EncryptLauncher extends PropertiesLauncher {
             System.err.println("[Encrypt] FATAL: Whole-JAR verification error: " + e.getMessage());
             System.exit(1);
         }
+    }
+
+    /**
+     * 从命令行参数中提取值，支持 --key=value 写法。
+     */
+    private static String extractArgValue(String arg, String key) {
+        String prefix = "--" + key + "=";
+        if (arg.startsWith(prefix)) {
+            return arg.substring(prefix.length());
+        }
+        return null;
     }
 }
