@@ -52,7 +52,11 @@ jar-boot-encrypt/
 ### `xyenc/EncryptLauncher.java` - 加密 JAR 启动器
 
 - 继承 `PropertiesLauncher`（支持 `-Dloader.path` 外部依赖加载）
-- 密码来源：`-Djar.encrypt.password=xxx` 系统属性，或 stdin 交互输入
+- 密码/签名来源（优先级从高到低）：
+  1. `-Djar.encrypt.password=xxx` / `-Djar.encrypt.sign=xxx` 系统属性
+  2. 命令行参数：`java -jar app.jar <password> <jarSign>`
+  3. jarSign 可从 JAR 同级目录的 `.sign` 文件自动读取
+  4. stdin 交互输入（兜底）
 - 重写 `createClassLoader()`：用 `DecryptClassLoader` 包装原始 ClassLoader
 - **启动时完整性校验**：读取 `META-INF/ENCRYPT-SIGN`，重新计算所有加密 class 的 HMAC-SHA256 并比对，不一致则拒绝启动
 
@@ -116,8 +120,9 @@ target/
 
 ```
 JVM 启动
-  └→ EncryptLauncher.main()
-       ├→ 读取密码 (-Djar.encrypt.password 或 stdin)
+  └→ EncryptLauncher.main(args)
+       ├→ 读取密码 (优先级: -D属性 > args[0] > stdin)
+       ├→ 读取jarSign (优先级: -D属性 > args[1] > .sign文件 > stdin)
        ├→ SHA-256 派生 AES Key + IV
        ├→ verifyJarFile()  ← 第一层：整包校验
        │    ├→ 从 code source 获取 JAR 文件路径

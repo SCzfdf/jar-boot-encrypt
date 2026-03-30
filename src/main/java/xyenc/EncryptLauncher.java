@@ -15,8 +15,10 @@ import java.util.Collection;
  * 加密 JAR 启动器。extends PropertiesLauncher 以支持 -Dloader.path 外部依赖加载。
  * <p>
  * 密码来源（优先级）：
- * 1. -Djar.encrypt.password=xxx 系统属性
- * 2. stdin 单行输入
+ * 1. -Djar.encrypt.password=xxx / -Djar.encrypt.sign=xxx 系统属性
+ * 2. 命令行参数: java -jar app.jar <password> <jarSign>
+ * 3. jarSign 可从 jar 同级目录的 .sign 文件自动读取
+ * 4. stdin 单行输入
  * <p>
  * 启动时执行完整性校验：读取 META-INF/ENCRYPT-SIGN，重新计算 HMAC 与之比对。
  * 校验失败则拒绝启动，防止加密 class 被篡改。
@@ -31,8 +33,24 @@ public class EncryptLauncher extends PropertiesLauncher {
     }
 
     public static void main(String[] args) throws Exception {
+        // 优先级: 1. -D系统属性  2. 命令行参数  3. stdin控制台输入
         String password = System.getProperty("jar.encrypt.password");
         String jarSign = System.getProperty("jar.encrypt.sign");
+
+        // 从命令行参数读取 (java -jar app.jar <password> <jarSign>)
+        if ((password == null || password.trim().isEmpty()) && args.length > 0 && args[0] != null && !args[0].trim().isEmpty()) {
+            password = args[0].trim();
+        }
+        if ((jarSign == null || jarSign.trim().isEmpty()) && args.length > 1 && args[1] != null && !args[1].trim().isEmpty()) {
+            jarSign = args[1].trim();
+        }
+
+        // 从jar同级目录的 .sign 文件读取 jarSign
+        if (jarSign == null || jarSign.trim().isEmpty()) {
+            jarSign = readJarSignFile();
+        }
+
+        // 兜底: stdin控制台输入
         if (password == null || password.trim().isEmpty()) {
             System.out.print("Enter encryption password: ");
             System.out.flush();
@@ -40,11 +58,10 @@ public class EncryptLauncher extends PropertiesLauncher {
             password = reader.readLine();
         }
         if (password == null || password.trim().isEmpty()) {
-            System.err.println("[Encrypt] Error: No password provided. Use -Djar.encrypt.password=xxx or stdin.");
+            System.err.println("[Encrypt] Error: No password provided. Use -Djar.encrypt.password=xxx, command args, or stdin.");
             System.exit(1);
         }
         password = password.trim();
-
 
         if (jarSign == null || jarSign.trim().isEmpty()) {
             System.out.print("Enter encryption jarSign: ");
@@ -53,7 +70,7 @@ public class EncryptLauncher extends PropertiesLauncher {
             jarSign = reader.readLine();
         }
         if (jarSign == null || jarSign.trim().isEmpty()) {
-            System.err.println("[Encrypt] Error: No password provided. Use -Djar.encrypt.password=xxx or stdin.");
+            System.err.println("[Encrypt] Error: No jarSign provided. Use -Djar.encrypt.sign=xxx, command args, or stdin.");
             System.exit(1);
         }
         jarSign = jarSign.trim();
@@ -125,6 +142,34 @@ public class EncryptLauncher extends PropertiesLauncher {
             if (b == '\n') count++;
         }
         System.out.println("[Encrypt] Integrity check PASSED (" + count + " encrypted entries verified).");
+    }
+
+    /**
+     * 从 JAR 同级目录读取 .sign 文件获取 jarSign。
+     * 文件名为 JAR文件名 + ".sign"，如 app.jar.sign
+     */
+    private static String readJarSignFile() {
+        try {
+            URL codeSource = EncryptLauncher.class.getProtectionDomain().getCodeSource().getLocation();
+            File jarFile = new File(codeSource.toURI());
+            if (!jarFile.isFile()) {
+                return null;
+            }
+            File signFile = new File(jarFile.getAbsolutePath() + ".sign");
+            if (!signFile.exists()) {
+                return null;
+            }
+            try (BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(signFile)))) {
+                String line = br.readLine();
+                if (line != null && !line.trim().isEmpty()) {
+                    System.out.println("[Encrypt] Loaded jarSign from " + signFile.getName());
+                    return line.trim();
+                }
+            }
+        } catch (Exception e) {
+            System.out.println("[Encrypt] Warning: Failed to read .sign file: " + e.getMessage());
+        }
+        return null;
     }
 
     /**
